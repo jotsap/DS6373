@@ -7,3 +7,7 @@ https://coronavirus.jhu.edu/testing/individual-states
   
 CDC Deaths by State  
 https://covid.cdc.gov/covid-data-tracker/#cases_totalcases
+  
+Covid Tracking Project  
+https://covidtracking.com/data
+API: https://covidtracking.com/data/api  
