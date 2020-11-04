@@ -9,5 +9,8 @@ CDC Deaths by State
 https://covid.cdc.gov/covid-data-tracker/#cases_totalcases
   
 Covid Tracking Project  
-https://covidtracking.com/data
+https://covidtracking.com/data    
+
+https://covidtracking.com/data/download  
+
 API: https://covidtracking.com/data/api  
