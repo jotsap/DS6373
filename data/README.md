@@ -1,12 +1,13 @@
 ## Data Files
   
 * date
+* death
 * deathConfirmed
-* stat* * e
-* posi* * tive
-* posi* tiveCasesViral
-* posi* tiveTestsAntibody
-* posi* tiveTestsPeopleAntibody
+* state
+* positive
+* positiveCasesViral
+* positiveTestsAntibody
+* positiveTestsPeopleAntibody
 * positiveTestsViral
 * negative
 * negativeTestsAntibody
