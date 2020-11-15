@@ -1,24 +1,49 @@
 ## Data Files
   
-* date
-* death
-* deathConfirmed
-* state
-* positive
-* positiveCasesViral
-* positiveTestsAntibody
-* positiveTestsPeopleAntibody
-* positiveTestsViral
-* negative
-* negativeTestsAntibody
-* negativeTestsPeopleAntibody
-* negativeTestsViral
-* totalTestsAntibody
-* totalTestsPeopleAntibody
-* totalTestsViral
+### Variable Count
 
-
-totalTestsPeopleViral
+* positiveTestsPeopleAntigen           13514
+* totalTestsPeopleAntigen              13396
+* positiveTestsAntigen                 13308
+* negativeTestsPeopleAntibody          13139
+* positiveTestsPeopleAntibody          13139
+* totalTestsAntigen                    13082
+* negativeTestsAntibody                12979
+* onVentilatorCumulative               12969
+* totalTestsPeopleAntibody             12748
+* positiveTestsAntibody                11954
+* inIcuCumulative                      11450
+* totalTestsAntibody                   11287
+* negativeTestsViral                   10868
+* totalTestEncountersViral             10599
+* positiveTestsViral                   9587
+* deathProbable                        9563
+* onVentilatorCurrently                8586
+* totalTestsPeopleViral                8088
+* deathConfirmed                       8015
+* inIcuCurrently                       7469
+* hospitalized                         5815
+* hospitalizedCumulative               5815
+* totalTestsViral                      5308
+* recovered                            4061
+* positiveCasesViral                   3172
+* hospitalizedCurrently                3010
+* death                                818
+* negative                             306
+* positive                             133
+* totalTestResults                     35
+* date                                 0
+* state                                0
+* dataQualityGrade                     0
+* deathIncrease                        0
+* hospitalizedIncrease                 0
+* negativeIncrease                     0
+* positiveIncrease                     0
+* positiveScore                        0
+* totalTestEncountersViralIncrease     0
+* totalTestResultsIncrease             0
+* totalTestsPeopleViralIncrease        0
+* totalTestsViralIncrease              0
   
 Covid Tracking Project  
 https://covidtracking.com/data    
