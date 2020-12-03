@@ -1,0 +1,1989 @@
+---
+title: "DS6373 Final Project"
+author: "Jeremy Otsap and Spencer Fogleman"
+date: "11/28/2020"
+output: 
+  html_document:
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+# load necessary libraries
+library(tidyverse)
+library(VIM)
+library(tswge)
+library(nnfor)
+
+
+```
+
+
+
+## Exploring the Data
+
+
+**Loading the Data**
+
+Data was loaded from the Covid Tracking website using the APIs they provided.
+NOTE: if the CSV does not pull we have the JSON API as an alternate method
+
+https://covidtracking.com/about-data/data-definitions
+
+
+** NOTE: DATA PULL AS OF NOV 30, 2020 **
+Results will vary depending on when you initiate a fresh pull
+
+
+```{r }
+
+#load full dataframe
+# https://covidtracking.com/about-data/data-definitions
+
+### ALTERNATE USING JSON API
+#library(jsonlite)
+#covidjson.df <- fromJSON( 'https://api.covidtracking.com/v1/states/daily.json' )
+
+# CSV API
+covidlive.df <- read.csv('https://api.covidtracking.com/v1/states/daily.csv', header = T)
+
+# validate data set
+str(covidlive.df)
+
+```
+
+
+
+**Data Cleaning**
+
+There are a number of issues with the data quality
+
+* the data set includes data from outside the official 50 US states [Guam, Puerto Rico, etc]
+* the date field is seen as a factor
+* there are a number of parameters with missing values that far exceed 5%
+* states began recording their data on different dates
+* states did not use the same tests, data collection, or schema to record their results
+
+
+
+**US Territories**
+
+The data includes measurements from US territories such as Guam, American Somoa, Puerto Rico, and the Virgin Islands. First we need to filter out to include only the 50 US States plus the District of Columbia.
+
+NOTE: we add an abritrary rowId field simply to help with advanced queries
+
+```{r }
+
+#remove Non US States: Guam, Puerto Rico, American Somoa, Virgin Islands
+# ALTERNATE: covidlive.df[covidlive.df$state != c('AS','GU','MP','PR','VI'),] 
+covidlive.df %>% dplyr::filter( !state %in% c('AS','GU','MP','PR','VI')) -> covidclean.df
+
+# add rowId for easier tracking & comparison: INTERNAL USE ONLY
+covidclean.df$rowId <- 1:length(covidclean.df$positive)
+
+```
+
+
+
+**Date**
+
+The date is being stored as a factor rather than an actual 'date' object. Here we convert to a POSIX date object. 
+
+
+```{r }
+
+# convert date from factor to date type
+base::as.Date( as.factor(covidclean.df$date), "%Y%m%d" ) -> covidclean.df$date
+
+```
+
+The start date for the entire data set is from Jan 22, 2020. However showing by state we can see the discrepancy, that most of the states did not start recording data until after March of 2020. 
+
+
+```{r }
+
+
+covidclean.df %>%
+  dplyr::select(date, state) %>% 
+  group_by(state) %>% 
+  summarise(
+     first_date = min(date), total_tests = n()
+  ) %>% .[order(.$first_date,decreasing = T),]
+
+
+
+```
+
+For the purpose of accurate modeling for the entire US we must filter to the lowest common denominator of March 7, 2020
+
+
+```{r }
+
+# filter date filter(date > '2020-03-08')
+
+covidclean.df %>% 
+  dplyr::filter( date > '2020-03-07') -> covidclean.df
+
+
+```
+
+
+
+**Missing and Inconsistent Values**
+
+We can see most fields have a large number of missing values. However the data quality issues is a bit more complex than that, since there are also discrepancies in the test values.
+
+For example positive vs positiveTestViral vs positiveTestAntibodies. Or certain states derive the total tests based on adding all the other tests together, where as some record this value separately.
+
+Furthermore these values are *cumulative* and certain states did not record a delta increase and thus this is calculated from the columns running total, which erroneously substitutes a 0 whenever there is a missing value
+
+Our strategy needs to be a little bit different since different states may have used different parameters to record their results
+
+
+
+```{r }
+
+# Missing Values: from VIM package
+aggr(covidclean.df, 
+     plot = F,
+     prop = F, 
+     combined = F, 
+     numbers = T, 
+     sortVars = T, 
+     sortCombs = T)
+
+```
+
+
+
+AK has most of the missing values for any of the positive derivatives. However, seeing that the negative is fully detailed its reasonable to assume that at this point they had not had their first positive Covid-19 test
+
+MA has some discrepancies with the total number of tests, yet have a value for positiveTestsViral
+
+All discrepancies occur within the first half of March 2020
+
+
+```{r }
+
+# show missing positive vs all positive derived columns
+
+covidclean.df[is.na(covidclean.df$positive), c('date','state', 'positive', 'negative', 'total', 'positiveTestsViral', 'totalTestResults', 'totalTestsViral', ) ]
+
+
+```
+
+
+Here we have quite a bit of discrepancies in terms of correlating total tests, positive, negative, etc. For exmple MA on March 10, 2020:
+
+* totalTestResults of 502
+* positiveTestsViral o 118
+* total of 0
+* negative NA
+* positive NA
+
+
+Looking at the dates we can see all discrepancies occur within the first half of March 2020
+
+
+```{r }
+
+# show all negatives
+
+covidclean.df[is.na(covidclean.df$negative), c('date','state', 'positive', 'negative',  'negativeTestsViral', 'total', 'positiveTestsViral','negativeTestsAntibody', 'negativeTestsPeopleAntibody', 'totalTestResults', 'totalTestsViral' ) ]
+
+
+#covidclean.df[is.na(covidclean.df$positive), c('date','state', 'total', 'totalTestResults', 'totalTestsViral', 'totalTestsAntibody', 'totalTestsAntigen', 'totalTestsPeopleAntibody', 'totalTestsPeopleAntigen', 'totalTestsPeopleViral' ) ]
+
+
+
+
+
+```
+
+
+To help further illustrate the data discrepancy we are going to look at data with missing values for death. Again as these are all prior to April of 2020 its reasonable to assume these states had not recorded any deaths during these dates.
+
+Additionally, if you compare total, totalTestResults, and the sum of negative + positive, its clear there are some discrepancies to account for
+
+
+
+```{r }
+
+# show all deaths
+
+covidclean.df[is.na(covidclean.df$death), c('date','state', 'death', 'positive', 'negative',  'negativeTestsViral', 'total', 'positiveTestsViral', 'totalTestResults', 'totalTestsViral', 'deathConfirmed', 'deathProbable' ) ]
+
+
+
+
+```
+
+
+Showing discrepancies between total tests vs positive + negative. Note this is significant as this will effect the positivity rate. And again, because this is a *cumulative* total, this can cause further issues with the data.
+
+And again looking at the variety of total parameters, 'total' is overall the most accurate and has the fewest missing values
+
+```{r }
+
+covidclean.df[ 
+  covidclean.df$total - (covidclean.df$positive + covidclean.df$negative) != 0
+  , c('state', 'date', 'positive', 'negative','total', 'totalTestResults' ) ] %>% 
+  .[order(.$state, decreasing = F),]
+
+
+
+```
+
+
+And here we can see which states are the biggest offenders. 
+
+
+```{r }
+
+covidclean.df[ 
+  covidclean.df$total - (covidclean.df$positive + covidclean.df$negative) != 0
+  , c('state', 'date', 'positive', 'negative', 'death' ) ] %>% 
+  .[order(.$state, decreasing = F),] %>% count(state)
+
+
+
+```
+
+
+
+**Addressing NA Values**
+
+Given that so many discrepancies existed prior to April 2020 we will again filter out data by date, to include only entries from April 2020 and on.
+
+
+Also as mentioned several times above, the NA values discovered above were likely due to the fact that results for deaths or positive cases had not been recorded. Thus we will impute 0 for these NA values
+
+
+
+
+```{r }
+
+# filter date April 2020
+
+covidclean.df %>% 
+  dplyr::filter( date >= '2020-04-01') -> covidclean.df
+
+#Replace NAs
+covidclean.df[is.na(covidclean.df$positive),'positive'] <- 0
+covidclean.df[is.na(covidclean.df$negative),'negative'] <- 0
+covidclean.df[is.na(covidclean.df$death),'death'] <- 0
+
+#validate range
+range(covidclean.df$date)
+
+#validate no more NA values
+covidclean.df[is.na(covidclean.df$positive),c('state', 'date', 'positive', 'negative','total', 'totalTestResults' )] 
+covidclean.df[is.na(covidclean.df$negative),c('state', 'date', 'positive', 'negative','total', 'totalTestResults' )] 
+covidclean.df[is.na(covidclean.df$death),c('state', 'date', 'positive', 'negative','total', 'totalTestResults' )] 
+
+
+
+
+```
+
+
+
+
+
+###Data for Analysis
+
+There are 50+ data fields, and despite the issue of data quality, for the purposes of our analysis, the parameters we require for our analysis are:
+
+* **state** - state where tests were conducted
+* **date** - when were the test results *recorded* 
+* **daily positive** - number of positive tests per day
+* **daily negative** - number of negative tests per day
+* **daily total** - number of total tests per day
+* **daily positivity rate** - number of positive tests per day / total number of tests
+* **daily death** - number of deaths per day
+* **daily death rate** - daily death / daily positive
+
+
+**US National Data**
+
+We aggregate the test results by date across all states. Additionally the test results are cumulative values, thus we also need to calculate a daily total based on the delta of the prior values. Lastly, because the data does not have a Positivity Rate as part of the default parameters, we need to create it as a calculated field
+
+
+
+```{r }
+
+# because we are aggregating by date for US national total we cannot have the state in the final data frame
+
+COVID_totals_final <- covidclean.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(date) %>% 
+  summarize(
+    pos_sum = sum(positive), 
+    neg_sum = sum(negative),
+    death_sum=sum(death)) %>% 
+  ungroup() %>%
+  mutate(new_pos = c(pos_sum[1], diff(pos_sum, 1)), 
+         new_neg = c(neg_sum[1], diff(neg_sum, 1)), 
+         new_death = c(death_sum[1], diff(death_sum, 1))) %>%
+  mutate(totals = new_pos + new_neg) %>% 
+  mutate(day_of_week = as.factor(weekdays(date)) ) %>%
+  mutate(perc_pos = new_pos/totals) %>%
+  mutate(perc_death = new_death / totals) 
+
+#check for NAN to inf from division by 0
+COVID_totals_final[is.na(COVID_totals_final$perc_pos), 'perc_pos'] 
+COVID_totals_final[is.na(COVID_totals_final$perc_death), 'perc_death'] 
+
+# verify
+str(COVID_totals_final)
+head(COVID_totals_final)
+
+```
+
+Quickly validate no more missing values
+
+```{r }
+
+# Validate no more Missing Values
+aggr(COVID_totals_final, 
+     plot = F,
+     prop = F, 
+     combined = F, 
+     numbers = T, 
+     sortVars = T, 
+     sortCombs = T)
+
+```
+
+
+
+### Days of the Week by Positivity Rate
+
+* Friday: has largest total positive
+* Wednesday: has largest total death and percent positive
+
+
+
+```{r }
+
+# new data frame to aggregate by state rather than date for Top 5 stats
+
+COVID_totals_final %>%
+  dplyr::select(day_of_week, new_death, new_pos, new_neg) %>% 
+  group_by(day_of_week) %>%
+  summarise(
+    totalDeath = sum(new_death),
+    totalPos = sum(new_pos),
+    totalNeg = sum(new_neg)
+  ) %>%
+  ungroup() %>%
+  mutate( totalTests = totalPos + totalNeg) %>%
+  mutate( percPos = totalPos / totalTests ) %>%
+  mutate( percDeath = totalDeath / totalTests) %>%
+  arrange(desc(percPos))
+
+
+
+```
+
+
+
+
+### Top 5 by State
+
+Quick comparison of the top 5 states for:
+* Total number of positive results
+* Total number of deaths
+* Positivity rate for the state
+* Death rate for those that test positive
+
+
+Looking at this we can tell that the Positivity Rate is a more insightful parameter, since it controls the large disparity between the total population of a state, which is obviously a confounding variable.
+
+
+
+**Top 5 States by Total Positives**
+
+```{r }
+
+# new data frame to aggregate by state rather than date for Top 5 stats
+
+covidclean.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(state) %>% 
+  summarize(
+    totalPos = max(positive), 
+    totalNeg = max(negative),
+    totalDeath = max(death)) %>% 
+  ungroup() %>%
+  mutate(totalTests = totalPos + totalNeg) %>% 
+  mutate(posRate = totalPos/totalTests ) %>%
+  mutate(deathRate = totalDeath / totalTests) %>%
+  arrange(desc(totalPos)) %>% as.data.frame() %>% head()
+
+
+```
+
+
+
+**Top 5 States by Deaths**
+
+```{r }
+
+covidclean.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(state) %>% 
+  summarize(
+    totalPos = max(positive), 
+    totalNeg = max(negative),
+    totalDeath = max(death)) %>% 
+  ungroup() %>%
+  mutate(totalTests = totalPos + totalNeg) %>% 
+  mutate(posRate = totalPos/totalTests ) %>%
+  mutate(deathRate = totalDeath / totalTests) %>%
+  arrange(desc(totalDeath)) %>% as.data.frame() %>% head()
+
+
+
+```
+
+
+
+**Top 5 States by Positivity Rate**
+
+```{r }
+
+covidclean.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(state) %>% 
+  summarize(
+    totalPos = max(positive), 
+    totalNeg = max(negative),
+    totalDeath = max(death)) %>% 
+  ungroup() %>%
+  mutate(totalTests = totalPos + totalNeg) %>% 
+  mutate(posRate = totalPos/totalTests ) %>%
+  mutate(deathRate = totalDeath / totalTests) %>%
+  arrange(desc(posRate)) %>% as.data.frame() %>% head()
+
+```
+
+
+
+**Top 5 States by Mortality Rate**
+
+```{r }
+
+covidclean.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(state) %>% 
+  summarize(
+    totalPos = max(positive), 
+    totalNeg = max(negative),
+    totalDeath = max(death)) %>% 
+  ungroup() %>%
+  mutate(totalTests = totalPos + totalNeg) %>% 
+  mutate(posRate = totalPos/totalTests ) %>%
+  mutate(deathRate = totalDeath / totalTests) %>%
+  arrange(desc(deathRate)) %>% as.data.frame() %>% head()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Univariate Analysis
+
+There are 2 main concerns we are interested in understanding & predicting:
+* How many people will contract the disease COVID
+* How many people will have a die from COVID
+
+The variables we will examine are
+* **Positive Cases:** Number of people who have tested positive for COVID
+* **Positive Rate:** Positive cases / total state's tests; expressed as a percentage
+* **Deaths:** Number of fatalities resulting from COVID
+* **Mortality Rate:** Deaths / Total Tests; expressed as a percentage
+
+**Mortality vs Fatality**
+Very quickly we are specifically distinguishing the *Mortality Rate* which is the number of deaths with respect to total number of tests. The *Fatality Rate* is the number of deaths with respect to those who are infected and test positive
+
+**Cumulative vs Daily**
+By default our data gives the *cumulative* totals for each respective field. For time series analysis we need to look at the specific value for each time interval. Thus we will calculate the daily values by subtracting the deltas and using those values instead for any time series analysis
+
+
+
+
+
+### US National: Daily Positive
+
+Looking at the data we can immediately see this data appears to violate stationary requirements: the mean depends on time. Visually there appears to be some seasonality present in the data; however this could be due more to data collection cycles rather than the behavior of the disease.
+
+The data also appears to wander and has slowly damping ACFs, thus we may want to difference the data for analysis
+
+Lastly we have a very large outlier on April 1 which is somewhat suspect. This may be a data entry error, so for the purposes of analysis we will start on April 2, 2020
+
+```{r }
+
+#US Daily Death
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) + geom_point() +
+  geom_line() + labs(title='Daily Positives in US', x='Date', y='Daily Deaths')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+```
+
+
+**Spectrum analysis and ACF plot**
+
+See evidence for seasonality of 7; peaks at f = 0.14 and 0.28
+
+```{r, echo = F }
+
+#filter out April 1 2020
+
+COVID_totals_final %>% 
+  dplyr::filter( date > '2020-04-01') %>%
+  dplyr::select( new_pos ) %>% 
+  as.ts -> new_pos.ts
+
+# create ts plots
+plotts.sample.wge(new_pos.ts)
+
+```
+
+
+#### ARIMA Model
+
+
+**Seasonal Transformation & AR Analysis**
+
+
+Because of the heavy wandering we want to $(1 - B)$ difference the data
+
+We do see weak freq peaks at 0,  .14 and .28 so we may want to apply a weak seasonal filter 
+
+
+```{r }
+
+# (1 - B) difference
+new_pos.d1 <- artrans.wge(new_pos.ts, c(1))
+plotts.sample.wge(new_pos.d1 , arlimits = T)
+
+```
+
+
+
+
+
+**Factor Table**
+
+The factor table for $(1 - B^{7})$  is listed below
+
+>Factor                 Roots                Abs Recip    System Freq 
+1-1.0000B              1.0000               1.0000       0.0000
+1+0.4450B+1.0000B^2   -0.2225+-0.9749i      1.0000       0.2857
+1-1.2470B+1.0000B^2    0.6235+-0.7818i      1.0000       0.1429
+1+1.8019B+1.0000B^2   -0.9010+-0.4339i      1.0000       0.4286
+
+
+We overfit with p value of 12 and look at the factor table. When we overfit we see strong frequencies at 0, .14, .28
+
+Again this is possibly due to data collection behavior. 
+
+
+```{r }
+
+#overfit table
+est.ar.wge(new_pos.d1 , p=12)
+
+```
+
+
+Moderate seasonal filter $(1 - .7B^{7})$
+
+Opting for the simpler BIC AR(2) model
+
+```{r }
+
+# (1 - B^7) difference
+new_pos.d1s7 <- artrans.wge(new_pos.d1, c(0,0,0,0,0,0,.7))
+plotts.sample.wge(new_pos.d1s7 , arlimits = T)
+
+# pick AIC for differenced data
+
+aic5.wge(new_pos.d1s7, p=0:20, q=0:0) #picks AR(15)
+aic5.wge(new_pos.d1s7, p=0:20, q=0:0, type='bic') #picks AR(2)
+
+```
+
+
+Residuals do appear to be white noise
+
+$\sigma^{2} = 48449346$ 
+$\mu = 52985.72$
+
+
+```{r }
+
+#white noise test
+new_pos.est <- est.ar.wge(new_pos.d1s7, p=2)
+new_pos.ar2 <- artrans.wge(new_pos.d1s7, new_pos.est$phi)
+
+
+var(new_pos.ar2) 
+mean(new_pos.ts) 
+
+```
+
+
+
+Validate white noise
+
+In both cases fails to reject H0, however is fairly close for K=24
+
+```{r }
+
+ljung.wge(new_pos.ar2)$pval #FTR 0.0690124
+ljung.wge(new_pos.ar2, K=48)$pval #FTR 0.1373434
+
+
+```
+
+
+#### Short Term Forecasts
+
+Forecasting out 7 days
+
+```{r }
+
+# short-term forecasts of n = 7
+fore.aruma.wge(COVID_totals_final$new_pos, 
+               phi=new_pos.est$phi, 
+               lambda = c(rep(0,6), .7),
+               d=1,
+               n.ahead=7, 
+               limits=F) -> new_pos.fcast7
+
+
+```
+
+
+
+
+**GGPLOT VISUALIZATION OF FORECASTS**
+
+NOTE: Only doing this for **this one stat** so we have the code
+
+
+```{r }
+
+#length of 242
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds = new_pos.fcast7$f, 
+  upper = new_pos.fcast7$ul,
+  lower = new_pos.fcast7$ll, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+```
+
+
+
+**ASE**
+
+ASE value of 1158928974
+
+```{r }
+
+#place holder for length
+#NOTE since data is pulled live THIS WILL CHANGE
+ase_length <- length(COVID_totals_final$new_pos)
+
+# short-term forecasts of n = 7
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final$new_pos, 
+               phi=new_pos.est$phi, 
+               lambda = c(rep(0,6), .7),
+               d=1,
+               n.ahead=7, 
+               lastn = T,
+               limits=F) -> new_pos.ase7
+
+# Short-term ASE
+mean(
+  ( COVID_totals_final$new_pos[(ase_length-6):ase_length ] - new_pos.ase7$f )^2
+  )
+
+
+```
+
+
+**Rolling Window ASE**
+
+First we need to intially define the Window ASE Function.
+NOTE: this is a one-time snippet; we can re-use this function on later analysis
+
+
+```{r }
+
+#### ROLLING WINDOW ASE FUNCTION ####
+
+Rolling_Window_ASE <- function(series, trainingSize, horizon = 1, s = 0, d = 0, phis = 0, thetas = 0, lambdas=0)
+{
+  trainingSize = trainingSize
+  horizon = horizon
+  ASEHolder = numeric()
+  s = s
+  d = s
+  phis = phis
+  thetas = thetas
+  lambdas = lambdas
+  
+  
+  for( i in 1:(length(series)-(trainingSize + horizon) + 1))
+  {
+    
+    forecasts = fore.aruma.wge(
+      series[i:(i+(trainingSize-1))],
+      phi = phis, 
+      theta = thetas, 
+      s = s, 
+      d = d, 
+      lambda = lambdas, 
+      n.ahead = horizon,
+      lastn = T,
+      plot=F)
+    
+    ASE <- mean((series[(trainingSize+i):(trainingSize+ i + (horizon) - 1)] - forecasts$f)^2)
+    
+    ASEHolder[i] <- ASE
+    
+  }
+  
+  WindowedASE = mean(ASEHolder)
+  
+  print("The Summary Statistics for the Rolling Window ASE Are:")
+  print(summary(ASEHolder))
+  print(paste("The Rolling Window ASE is: ",WindowedASE))
+  return(WindowedASE)
+}
+
+
+```
+
+
+We pick a training size of 35 and get a better Window ASE of 606019267 
+
+
+```{r }
+
+Rolling_Window_ASE(
+  series = COVID_totals_final$new_pos, 
+  trainingSize = 35, 
+  horizon = 7, 
+  phis = new_pos.est$phi,
+  lambdas = c(rep(0,6), .7),
+  d=1
+  )
+
+
+
+```
+
+
+
+#### Long-Term Forecast
+
+Forecasting out 30 days. As with a seasonal AR2 it cycles back towards the mean
+
+```{r }
+
+# short-term forecasts of n = 30
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final$new_pos, 
+               phi=new_pos.est$phi, 
+               lambda = c(rep(0,6), .7),
+               d=1,
+               n.ahead=30, 
+               limits=F) -> new_pos.fcast30
+
+
+```
+
+
+**GGPLOT VISUALIZATION OF FORECASTS**
+
+NOTE: Only doing this for **this one stat** so we have the code
+
+
+```{r }
+
+#length of 242
+#length(COVID_totals_final$date)
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds = new_pos.fcast30$f, 
+  upper = new_pos.fcast30$ul,
+  lower = new_pos.fcast30$ll, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+```
+
+
+
+**ASE**
+
+ASE value of 2135052668
+
+```{r }
+
+#place holder for length
+#NOTE since data is pulled live THIS WILL CHANGE
+ase_length <- length(COVID_totals_final$new_pos)
+
+# short-term forecasts of n = 7
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final$new_pos, 
+               phi=new_pos.est$phi, 
+               lambda = c(rep(0,6), .7),
+               d=1,
+               n.ahead=30, 
+               lastn = T,
+               limits=F) -> new_pos.ase30
+
+# Short-term ASE
+
+mean(
+  ( COVID_totals_final$new_pos[(ase_length-29):ase_length ] - new_pos.ase30$f )^2
+  )
+
+
+```
+
+
+
+**Rolling Window ASE**
+
+We pick a training size of 90 and get a better Window ASE of 1326518685
+
+
+```{r }
+
+Rolling_Window_ASE(
+  series = COVID_totals_final$new_pos, 
+  trainingSize = 90, 
+  horizon = 30, 
+  phis = new_pos.est$phi,
+  lambdas = c(rep(0,6), .7),
+  d=1
+  )
+
+
+
+```
+
+
+
+
+#### MLP Model
+
+
+**Short-Term Model**
+
+
+```{r }
+
+mlp_length <- length(COVID_totals_final$new_pos)
+
+# TRAIN / TEST SPLIT
+# split for pred 30
+COVID_totals_final$new_pos[1:(mlp_length-7)] %>% 
+  as.ts() -> new_pos.train
+
+
+COVID_totals_final$new_pos[(mlp_length-6):mlp_length] %>% 
+  as.ts() -> new_pos.test
+
+
+```
+
+
+MLP MODEL STATS
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Series modelled in differences: D1D7.
+Univariate lags: (1,2)
+Forecast combined using the mean operator.
+MSE: 47144729.4646
+
+
+```{r }
+
+new_pos.mlp <- mlp(
+  new_pos.ts, 
+  difforder = c(1,7),
+  allow.det.season = F,
+  reps = 50, 
+  comb = "mean")
+
+new_pos.mlp
+
+# Visualize the Neural Network
+plot(new_pos.mlp)
+
+
+```
+
+
+**MLP Short-Term Predictions**
+
+
+```{r }
+
+#MLP Forecast
+new_pos.mlp.f <- forecast(new_pos.mlp, h = 7 )
+plot(new_pos.mlp.f)
+
+
+```
+
+
+BECAUSE THE GRAPH IS HARD TO READ WITH THE EXTREME OUTLIER
+
+
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds =  as.vector(new_pos.mlp.f$mean) , 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+
+
+```
+
+
+
+
+**MLP Short-Term ASE**
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Series modelled in differences: D1D7.
+Univariate lags: (1,2)
+Forecast combined using the mean operator.
+MSE: 25868986.6972.
+
+
+ASE: 1240337749
+
+
+```{r }
+
+#ASE MLP Model
+new_pos.ase.mlp <- mlp(
+  new_pos.train, 
+  difforder = c(1,7), 
+  allow.det.season = F,
+  reps = 50, 
+  comb = "mean")
+new_pos.ase.mlp
+
+
+
+new_pos.mlp.ase.f <- forecast(new_pos.ase.mlp, h = length(new_pos.test) )
+
+plot(new_pos.mlp.ase.f)
+
+#ASE 
+mean(( as.vector(new_pos.test) - as.vector(new_pos.mlp.ase.f$mean) )^2)
+
+
+
+```
+
+
+
+####Short-Term Ensemble
+
+We average the predictions from the ARUMA and the MLP
+
+The ASE is 258074703
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds = (new_pos.fcast7$f + as.vector(new_pos.mlp.f$mean))/2, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+#ASE
+
+mean(
+  ((new_pos.fcast7$f + as.vector(new_pos.mlp.ase.f$mean))/2 - new_pos.test)^2
+)
+
+```
+
+
+
+**Long-Term Model**
+
+```{r }
+
+mlp_length <- length(COVID_totals_final$new_pos)
+
+# TRAIN / TEST SPLIT
+# split for pred 30
+COVID_totals_final$new_pos[1:(mlp_length-30)] %>% 
+  as.ts() -> new_pos.train
+
+
+COVID_totals_final$new_pos[(mlp_length-29):mlp_length] %>% 
+  as.ts() -> new_pos.test
+
+
+```
+
+
+MLP MODEL STATS
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Series modelled in differences: D1D7.
+Univariate lags: (1,2)
+Forecast combined using the mean operator.
+MSE: 47144729.4646
+
+
+```{r }
+
+new_pos.mlp <- mlp(
+  new_pos.ts, 
+  difforder = c(1,7),
+  allow.det.season = F,
+  reps = 50, 
+  comb = "mean")
+
+new_pos.mlp
+
+# Visualize the Neural Network
+plot(new_pos.mlp)
+
+
+```
+
+
+**MLP Long-Term Predictions**
+
+
+```{r }
+
+#MLP Forecast
+new_pos.mlp.f <- forecast(new_pos.mlp, h = 30 )
+plot(new_pos.mlp.f)
+
+
+```
+
+
+BECAUSE THE GRAPH IS HARD TO READ WITH THE EXTREME OUTLIER
+
+
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds =  as.vector(new_pos.mlp.f$mean) , 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+
+
+```
+
+
+
+**MLP Long-Term ASE**
+
+648829122
+
+
+```{r }
+
+#ASE MLP Model
+new_pos.ase.mlp <- mlp(
+  new_pos.train, 
+  difforder = c(1,7), 
+  allow.det.season = F,
+  reps = 50, 
+  comb = "mean")
+new_pos.ase.mlp
+
+
+
+new_pos.mlp.ase.f <- forecast(new_pos.ase.mlp, h = length(new_pos.test) )
+
+plot(new_pos.mlp.ase.f)
+
+#ASE 
+mean(( as.vector(new_pos.test) - as.vector(new_pos.mlp.ase.f$mean) )^2)
+
+
+
+```
+
+
+
+####Long-Term Ensemble
+
+We average the predictions from the ARUMA and the MLP
+
+The ASE is 898717323
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final$date[ length(COVID_totals_final$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds = (new_pos.fcast30$f + as.vector(new_pos.mlp.f$mean))/2, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+#ASE
+
+mean(
+  ((new_pos.fcast30$f + as.vector(new_pos.mlp.ase.f$mean))/2 - new_pos.test)^2
+)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+### CA State: Positive Cases
+
+**California State Data**
+
+For later analysis we separate out the data specifically from California
+
+
+```{r }
+
+#CALIFORNIA ONLY
+
+#filter for only CA
+covidclean_ca.df <- covidclean.df[covidclean.df$state == 'CA',]
+
+#create CA final data frame
+COVID_totals_final_ca <- covidclean_ca.df %>%
+  dplyr::select(date, state, positive, negative, death) %>% 
+  group_by(date) %>% 
+  summarize(
+    pos_sum = sum(positive), 
+    neg_sum = sum(negative),
+    death_sum=sum(death)) %>% 
+  ungroup() %>%
+  mutate(new_pos = c(pos_sum[1], diff(pos_sum, 1)), 
+         new_neg = c(neg_sum[1], diff(neg_sum, 1)), 
+         new_death = c(death_sum[1], diff(death_sum, 1))) %>%
+  mutate(totals = new_pos + new_neg) %>% 
+  mutate(day_of_week = as.factor(weekdays(date)) ) %>%
+  mutate(perc_pos = new_pos/totals) %>%
+  mutate(perc_death = new_death / totals) 
+
+
+#check for NAN to inf from division by 0
+COVID_totals_final_ca[is.na(COVID_totals_final_ca$perc_pos), 'perc_pos']
+COVID_totals_final_ca[is.na(COVID_totals_final_ca$perc_death), 'perc_death'] 
+
+
+# verify
+str(COVID_totals_final_ca)
+head(COVID_totals_final_ca)
+
+```
+
+
+Quickly validate no more missing values
+
+```{r }
+
+# Validate no more Missing Values
+aggr(COVID_totals_final_ca, 
+     plot = F,
+     prop = F, 
+     combined = F, 
+     numbers = T, 
+     sortVars = T, 
+     sortCombs = T)
+
+```
+
+
+
+### Days of the Week Ranking 
+
+* Thursday: has largest total death and largest mortality rate
+* Wednesday: has highest percent positive and total positive and 2nd highest total death
+
+
+
+```{r }
+
+COVID_totals_final_ca %>%
+  dplyr::select(day_of_week, new_death, new_pos, new_neg) %>% 
+  group_by(day_of_week) %>%
+  summarise(
+    totalDeath = sum(new_death),
+    totalPos = sum(new_pos),
+    totalNeg = sum(new_neg)
+  ) %>%
+  ungroup() %>%
+  mutate( totalTests = totalPos + totalNeg) %>%
+  mutate( percPos = totalPos / totalTests ) %>%
+  mutate( percDeath = totalDeath / totalTests) %>%
+  arrange(desc(totalPos))
+
+
+
+```
+
+
+
+
+
+### CA State: Daily Positive
+
+Looking at the data we can immediately see this data appears to violate stationary requirements: the mean depends on time. Visually there appears to be some seasonality present in the data; however this could be due more to data collection cycles rather than the behavior of the disease.
+
+The data also appears to wander and has slowly damping ACFs, thus we may want to difference the data for analysis
+
+Lastly we have a very large outlier on April 1 which is somewhat suspect. This may be a data entry error, so for the purposes of analysis we will start on April 2, 2020
+
+```{r }
+
+#US Daily Death
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) + geom_point() +
+  geom_line() + labs(title='Daily Positives in US', x='Date', y='Daily Deaths')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+```
+
+
+**Spectrum analysis and ACF plot**
+
+Less evidence for seasonality of 7; very small peaks at f = 0.14 and 0.28 which we can test for by overfitting
+
+```{r, echo = F }
+
+#filter out April 1 2020
+
+COVID_totals_final_ca %>% 
+  dplyr::filter( date > '2020-04-01') %>%
+  dplyr::select( new_pos ) %>% 
+  as.ts -> new_pos_ca.ts
+
+# create ts plots
+plotts.sample.wge(new_pos_ca.ts)
+
+```
+
+
+#### ARIMA Model
+
+
+**Seasonal Transformation & AR Analysis**
+
+
+Because of the heavy wandering we want to $(1 - B)$ difference the data
+
+We do see weak freq peaks at .28 on the differenced data 
+
+
+```{r }
+
+# (1 - B) difference
+new_pos_ca.d1 <- artrans.wge(new_pos_ca.ts, c(1))
+plotts.sample.wge(new_pos_ca.d1 , arlimits = T)
+
+```
+
+
+
+
+
+**Factor Table**
+
+
+We overfit with p value of 12 and look at the factor table. When we overfit we see strong frequencies .28
+
+Data collection behavior or patients choosing to go or not go in for testing on certain days of the week
+
+
+```{r }
+
+#overfit table
+est.ar.wge(new_pos_ca.d1 , p=12)
+
+```
+
+
+AIC picks AR(12) model
+
+```{r }
+
+# pick AIC for differenced data
+
+aic5.wge(new_pos_ca.d1, p=0:20, q=0:0) #picks AR(12)
+aic5.wge(new_pos_ca.d1, p=0:20, q=0:0, type='bic') #picks AR(3)
+
+```
+
+
+Residuals do appear to be white noise
+
+$\sigma^{2} = 1740969$ 
+$\mu = 4876.203$
+
+
+```{r }
+
+#white noise test
+new_pos_ca.est <- est.ar.wge(new_pos_ca.d1, p=12)
+new_pos_ca.ar12 <- artrans.wge(new_pos_ca.d1, new_pos_ca.est$phi)
+
+
+var(new_pos_ca.ar12) 
+mean(new_pos_ca.ts) 
+
+```
+
+
+
+Validate white noise
+
+In both cases fails to reject H0
+
+```{r }
+
+ljung.wge(new_pos_ca.ar12)$pval #FTR 0.9671455
+ljung.wge(new_pos_ca.ar12, K=48)$pval #FTR 0.9887728
+
+
+```
+
+
+#### Short Term Forecasts
+
+Forecasting out 7 days. As expected with $(1 - B)$ model, cycles around last value
+
+```{r }
+
+# short-term forecasts of n = 7
+fore.aruma.wge(COVID_totals_final_ca$new_pos, 
+               phi=new_pos_ca.est$phi,
+               d=1,
+               n.ahead=7, 
+               limits=F) -> new_pos_ca.fcast7
+
+
+```
+
+
+
+
+**GGPLOT VISUALIZATION OF FORECASTS**
+
+NOTE: Only doing this for **this one stat** so we have the code
+
+
+```{r }
+
+#length of 242
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds = new_pos_ca.fcast7$f, 
+  upper = new_pos_ca.fcast7$ul,
+  lower = new_pos_ca.fcast7$ll, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in CA')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+```
+
+
+
+**ASE**
+
+ASE value of 7429671
+
+```{r }
+
+#place holder for length
+#NOTE since data is pulled live THIS WILL CHANGE
+ase_length <- length(COVID_totals_final_ca$new_pos)
+
+# short-term forecasts of n = 7
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final_ca$new_pos, 
+               phi= new_pos_ca.est$phi,
+               d=1,
+               n.ahead=7, 
+               lastn = T,
+               limits=F) -> new_pos_ca.ase7
+
+# Short-term ASE
+mean(
+  ( COVID_totals_final_ca$new_pos[(ase_length-6):ase_length ] - new_pos_ca.ase7$f )^2
+  )
+
+
+```
+
+
+**Rolling Window ASE**
+
+
+
+We pick a training size of 28 and get a better Window ASE of 7201578 
+
+
+```{r }
+
+Rolling_Window_ASE(
+  series = COVID_totals_final_ca$new_pos, 
+  trainingSize = 28, 
+  horizon = 7, 
+  phis = new_pos_ca.est$phi,
+  d=1
+  )
+
+
+
+```
+
+
+
+#### Long-Term Forecast
+
+Forecasting out 30 days. As with $(1 - B)$2 AR2 it cycles back towards the last value
+
+```{r }
+
+# short-term forecasts of n = 30
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final_ca$new_pos, 
+               phi=new_pos_ca.est$phi,
+               d=1,
+               n.ahead=30, 
+               limits=F) -> new_pos_ca.fcast30
+
+
+```
+
+
+**GGPLOT VISUALIZATION OF FORECASTS**
+
+
+```{r }
+
+#length of 242
+#length(COVID_totals_final$date)
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds = new_pos_ca.fcast30$f, 
+  upper = new_pos_ca.fcast30$ul,
+  lower = new_pos_ca.fcast30$ll, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+```
+
+
+
+**ASE**
+
+ASE value of 41134309
+
+Prediction performance is fairly poor since the actual data wanders up, where as the predictions for $(1 - B)$ revolve around the last value
+
+```{r }
+
+#place holder for length
+#NOTE since data is pulled live THIS WILL CHANGE
+ase_length <- length(COVID_totals_final_ca$new_pos)
+
+# short-term forecasts of n = 30
+# using FULL data NOT training
+fore.aruma.wge(COVID_totals_final_ca$new_pos, 
+               phi=new_pos_ca.est$phi,
+               d=1,
+               n.ahead=30, 
+               lastn = T,
+               limits=F) -> new_pos_ca.ase30
+
+# Short-term ASE
+
+mean(
+  ( COVID_totals_final_ca$new_pos[(ase_length-29):ase_length ] - new_pos_ca.ase30$f )^2
+  )
+
+
+```
+
+
+
+**Rolling Window ASE**
+
+We pick a training size of 90 and get a better Window ASE of 14292449
+
+
+```{r }
+
+Rolling_Window_ASE(
+  series = COVID_totals_final_ca$new_pos, 
+  trainingSize = 90, 
+  horizon = 30, 
+  phis = new_pos_ca.est$phi,
+  d=1
+  )
+
+
+
+```
+
+
+
+
+#### MLP Model
+
+
+**Short-Term Model**
+
+
+```{r }
+
+mlp_length <- length(COVID_totals_final_ca$new_pos)
+
+# TRAIN / TEST SPLIT
+# split for pred 7
+COVID_totals_final_ca$new_pos[1:(mlp_length-7)] %>% 
+  as.ts() -> new_pos_ca.train
+
+
+COVID_totals_final_ca$new_pos[(mlp_length-6):mlp_length] %>% 
+  as.ts() -> new_pos_ca.test
+
+
+```
+
+
+MLP MODEL STATS
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Univariate lags: (1,3,4)
+Forecast combined using the mean operator.
+MSE: 1411912.9841.
+
+
+```{r }
+
+new_pos_ca.mlp <- mlp(
+  new_pos_ca.ts,
+  reps = 50, 
+  comb = "mean")
+
+new_pos_ca.mlp
+
+# Visualize the Neural Network
+plot(new_pos_ca.mlp)
+
+
+```
+
+
+**MLP Short-Term Predictions**
+
+
+```{r }
+
+#MLP Forecast
+new_pos_ca.mlp.f <- forecast(new_pos_ca.mlp, h = 7 )
+plot(new_pos_ca.mlp.f)
+
+
+```
+
+
+BECAUSE THE GRAPH IS HARD TO READ WITH THE EXTREME OUTLIER
+
+
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds =  as.vector(new_pos_ca.mlp.f$mean) , 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+
+
+```
+
+
+
+
+**MLP Short-Term ASE**
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Univariate lags: (1,3,4)
+Forecast combined using the mean operator.
+MSE: 1222255.3299.
+
+
+ASE: 17106342 
+
+
+```{r }
+
+#ASE MLP Model
+new_pos_ca.ase.mlp <- mlp(
+  new_pos_ca.train,
+  reps = 50, 
+  comb = "mean")
+new_pos_ca.ase.mlp
+
+
+
+new_pos_ca.mlp.ase.f <- forecast(new_pos_ca.ase.mlp, h = length(new_pos_ca.test) )
+
+plot(new_pos_ca.mlp.ase.f)
+
+#ASE 
+mean(( as.vector(new_pos_ca.test) - as.vector(new_pos_ca.mlp.ase.f$mean) )^2)
+
+
+
+```
+
+
+
+####Short-Term Ensemble
+
+We average the predictions from the ARUMA and the MLP
+
+The ASE is 10727860
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=8)[c(-1)]
+
+forecasts <- data.frame(
+  preds = (new_pos_ca.fcast7$f + as.vector(new_pos.mlp.f$mean))/2, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Short Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+#ASE
+
+mean(
+  ((new_pos_ca.fcast7$f + as.vector(new_pos_ca.mlp.ase.f$mean))/2 - new_pos_ca.test)^2
+)
+
+```
+
+
+
+**Long-Term Model**
+
+```{r }
+
+mlp_length <- length(COVID_totals_final_ca$new_pos)
+
+# TRAIN / TEST SPLIT
+# split for pred 30
+COVID_totals_final_ca$new_pos[1:(mlp_length-30)] %>% 
+  as.ts() -> new_pos_ca.train
+
+
+COVID_totals_final_ca$new_pos[(mlp_length-29):mlp_length] %>% 
+  as.ts() -> new_pos_ca.test
+
+
+```
+
+
+MLP MODEL STATS
+
+MLP fit with 5 hidden nodes and 50 repetitions.
+Univariate lags: (1,3,4)
+Forecast combined using the mean operator.
+MSE: 1405896.4134.
+
+
+```{r }
+
+new_pos_ca.mlp <- mlp(
+  new_pos_ca.ts,
+  reps = 50,
+  comb = "mean")
+
+new_pos_ca.mlp
+
+# Visualize the Neural Network
+plot(new_pos_ca.mlp)
+
+
+```
+
+
+**MLP Long-Term Predictions**
+
+
+```{r }
+
+#MLP Forecast
+new_pos_ca.mlp.f <- forecast(new_pos_ca.mlp, h = 30 )
+plot(new_pos_ca.mlp.f)
+
+
+```
+
+
+BECAUSE THE GRAPH IS HARD TO READ WITH THE EXTREME OUTLIER
+
+
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds =  as.vector(new_pos_ca.mlp.f$mean) , 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in US')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+
+
+```
+
+
+
+**MLP Long-Term ASE**
+
+26935580
+
+
+
+```{r }
+
+#ASE MLP Model
+new_pos_ca.ase.mlp <- mlp(
+  new_pos_ca.train,
+  reps = 50, 
+  comb = "mean")
+
+new_pos_ca.ase.mlp
+
+
+new_pos_ca.mlp.ase.f <- forecast(new_pos_ca.ase.mlp, h = length(new_pos_ca.test) )
+
+plot(new_pos_ca.mlp.ase.f)
+
+#ASE 
+mean(( as.vector(new_pos_ca.test) - as.vector(new_pos_ca.mlp.ase.f$mean) )^2)
+
+
+
+```
+
+
+
+####Long-Term Ensemble
+
+We average the predictions from the ARUMA and the MLP
+
+The ASE is 13690662 
+
+```{r }
+
+
+dates <- seq(as.Date(COVID_totals_final_ca$date[ length(COVID_totals_final_ca$date) ]), by='day', length.out=31)[c(-1)]
+
+forecasts <- data.frame(
+  preds = (new_pos_ca.fcast30$f + as.vector(new_pos_ca.mlp.f$mean))/2, 
+  dates = dates
+  )
+
+#Visualize
+ggplot(data=COVID_totals_final_ca, aes(x=date, y=new_pos)) +
+  geom_line()+geom_point() + ggtitle('Long Term Positive Cases Forecasts in CA')+
+  xlab(NULL)+ylab('Number Positive Cases')+
+  scale_x_date(date_labels = "%b/%d", date_breaks = '1 month')+
+  scale_y_continuous(breaks=seq(0,3000, 300))+
+  geom_line(data=forecasts, aes(x=dates, y=preds), color='red')
+
+
+#ASE
+
+mean(
+  ((new_pos_ca.fcast30$f + as.vector(new_pos_ca.mlp.ase.f$mean))/2 - new_pos_ca.test)^2
+)
+
+```
+
+
+
+
+
+
+
