@@ -6001,7 +6001,7 @@ In both cases fails to reject H0
 
 
 ```r
-ljung.wge(new_pos.ar2)$pval #FTR 0.6460292
+ljung.wge(new_pos.ar2, p=8)$pval #FTR 0.6460292
 ```
 
 ```
@@ -6013,7 +6013,7 @@ ljung.wge(new_pos.ar2)$pval #FTR 0.6460292
 ```
 
 ```r
-ljung.wge(new_pos.ar2, K=48)$pval #FTR 0.9400058
+ljung.wge(new_pos.ar2, p=8, K=48)$pval #FTR 0.9400058
 ```
 
 ```
@@ -8311,7 +8311,7 @@ In both cases fails to reject H0
 
 
 ```r
-ljung.wge(new_pos_ca.ar12)$pval #FTR 0.9847211
+ljung.wge(new_pos_ca.ar12, p=14)$pval #FTR 0.9847211
 ```
 
 ```
@@ -8323,7 +8323,7 @@ ljung.wge(new_pos_ca.ar12)$pval #FTR 0.9847211
 ```
 
 ```r
-ljung.wge(new_pos_ca.ar12, K=48)$pval #FTR 0.9970605
+ljung.wge(new_pos_ca.ar12, p=14, K=48)$pval #FTR 0.9970605
 ```
 
 ```
