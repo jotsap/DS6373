@@ -2,8 +2,8 @@
 ##Time Series in R class 
 http://datascience.smu.edu/
   
-Jeremy Otsap - jotsap@mail.smu.edu
-  
+Jeremy Otsap - jotsap@mail.smu.edu  
+Spencer Fogleman - sfogelman@mail.smu.edu  
 
 Misc Tools and Resources
 32bit ODBC SQL Connector: 32-bit SQL ODBC Driver  
